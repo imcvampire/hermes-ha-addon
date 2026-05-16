@@ -1,8 +1,6 @@
     # Direct dashboard API token guard. The SPA sends X-Hermes-Session-Token;
     # older bundles/proxies may still send Authorization: Bearer. Accept either,
     # then inject the bearer token upstream so Hermes' own middleware is happy.
-    # Dashboard tokens are long enough to exceed nginx's default 64-byte map bucket.
-    map_hash_bucket_size 128;
     map "$http_x_hermes_session_token|$http_authorization" $dashboard_token_ok {
         default 0;
         ~^%%DASHBOARD_TOKEN%%\| 1;

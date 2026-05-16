@@ -17,6 +17,10 @@ http {
     log_format minimal '$remote_addr - $request_uri $status';
     access_log /dev/stdout minimal;
 
+    # Dashboard tokens can exceed nginx's default 64-byte map bucket. This must
+    # be set before any map block is parsed.
+    map_hash_bucket_size 128;
+
     upstream ttyd_terminal {
         server 127.0.0.1:%%TTYD_TERMINAL_PORT%%;
     }

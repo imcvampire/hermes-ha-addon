@@ -58,11 +58,22 @@ class DashboardIngressPatchTests(unittest.TestCase):
         nginx_ports = (ROOT / "hermes_agent" / "nginx-ports.conf.tpl").read_text()
 
         self.assertIn("$http_x_hermes_session_token", nginx_ports)
-        self.assertIn("map_hash_bucket_size 128;", nginx_ports)
         self.assertIn("$dashboard_token_ok", nginx_ports)
         self.assertIn("~^%%DASHBOARD_TOKEN%%\\|", nginx_ports)
         self.assertIn("~^\\|Bearer\\ %%DASHBOARD_TOKEN%%$", nginx_ports)
         self.assertNotIn("$http_authorization != \"Bearer %%DASHBOARD_TOKEN%%\"", nginx_ports)
+
+    def test_nginx_sets_map_hash_bucket_size_before_first_map(self) -> None:
+        """nginx rejects map_hash_bucket_size after any map block has been parsed."""
+        nginx_conf = NGINX_TEMPLATE.read_text()
+        nginx_ports = NGINX_PORTS_TEMPLATE.read_text()
+
+        self.assertIn("map_hash_bucket_size 128;", nginx_conf)
+        self.assertLess(
+            nginx_conf.index("map_hash_bucket_size 128;"),
+            nginx_conf.index("map $http_x_forwarded_prefix"),
+        )
+        self.assertNotIn("map_hash_bucket_size", nginx_ports)
 
     def test_nginx_forwards_dashboard_prefix_to_modern_hermes(self) -> None:
         """Modern Hermes reads X-Forwarded-Prefix to set SPA base paths."""
