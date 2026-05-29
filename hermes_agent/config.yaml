@@ -31,6 +31,7 @@ options:
   hass_url: "http://homeassistant.local:8123"
   homeassistant_token: ""
   hermes_home: ".hermes"
+  profiles: []
   enable_dashboard: false
   enable_terminal: false
   enable_api: false
@@ -46,6 +47,11 @@ schema:
   hass_url: "url?"
   homeassistant_token: "password?"
   hermes_home: "str?"
+  profiles:
+    - home: "str"
+      env_vars?:
+        - name: "match(^[A-Z_][A-Z0-9_]{0,254}$)"
+          value: "str"
   enable_dashboard: "bool"
   enable_terminal: "bool"
   enable_api: "bool"
