@@ -21,6 +21,7 @@ GIT_TOKEN=$(opt git_token)
 AUTO_UPDATE=$(opt_bool auto_update)
 HASS_URL=$(opt hass_url)
 HASS_TOKEN=$(opt homeassistant_token)
+# shellcheck disable=SC2034  # consumed by resolve_profiles in profile-init.sh
 HERMES_HOME_DIR=$(opt hermes_home)
 ENABLE_DASHBOARD=$(opt_bool enable_dashboard)
 ENABLE_TERMINAL=$(opt_bool enable_terminal)
@@ -48,47 +49,25 @@ fi
 export HERMES_GATEWAY_NO_SUPERVISE=1
 
 # ── Section 3: Profile resolution ────────────────────────────────────
-# Read `profiles` list (each entry: {home, env_vars?}); fall back to legacy single `hermes_home`.
-PROFILE_DIRS=()
-mapfile -t PROFILE_DIRS < <(jq -r '.profiles[]?.home // empty' "$OPTIONS_FILE")
-if [ "${#PROFILE_DIRS[@]}" -eq 0 ]; then
-    PROFILE_DIRS=("${HERMES_HOME_DIR:-.hermes}")
-fi
-
-PROFILE_NAMES=()
-PROFILE_HOMES=()
-PROFILE_SRC_DIRS=()
-PROFILE_VENV_DIRS=()
-PROFILE_PATH_PREFIX=()
-PROFILE_MARKER=()
-for i in "${!PROFILE_DIRS[@]}"; do
-    dir="${PROFILE_DIRS[$i]}"
-    base="$(basename "$dir")"
-    base="${base#.}"
-    name="$(printf '%s' "$base" | tr -cs '[:alnum:]_' '_')"
-    name="${name%_}"
-    if [ -z "$name" ]; then
-        echo "[run] FATAL: profile dir '$dir' yields empty name after sanitization"
-        exit 1
+# Source the profile-init library. Resolves the `profiles` list (or legacy
+# `hermes_home`) into PROFILE_* arrays and per-profile port arrays.
+PROFILE_INIT_LIB=""
+for _candidate in \
+    "/usr/local/lib/hermes-profile-init.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/profile-init.sh"; do
+    if [ -f "$_candidate" ]; then
+        PROFILE_INIT_LIB="$_candidate"
+        break
     fi
-    # Uniqueness check
-    for j in "${!PROFILE_NAMES[@]}"; do
-        if [ "${PROFILE_NAMES[$j]}" = "$name" ]; then
-            echo "[run] FATAL: profile name collision ('$name' from '$dir' and '${PROFILE_DIRS[$j]}'); rename one"
-            exit 1
-        fi
-    done
-    PROFILE_NAMES[$i]="$name"
-    PROFILE_HOMES[$i]="$HOME/$dir"
-    PROFILE_SRC_DIRS[$i]="${PROFILE_HOMES[$i]}/hermes-agent"
-    PROFILE_VENV_DIRS[$i]="${PROFILE_SRC_DIRS[$i]}/venv"
-    if [ "$i" -eq 0 ]; then
-        PROFILE_PATH_PREFIX[$i]=""
-    else
-        PROFILE_PATH_PREFIX[$i]="/profile/$name"
-    fi
-    PROFILE_MARKER[$i]="$HOME/.hermes_install_${name}"
 done
+if [ -z "$PROFILE_INIT_LIB" ]; then
+    echo "[run] FATAL: profile-init.sh not found"
+    exit 1
+fi
+# shellcheck source=profile-init.sh
+source "$PROFILE_INIT_LIB"
+
+resolve_profiles || exit 1
 
 PRIMARY_HOME="${PROFILE_HOMES[0]}"
 PRIMARY_VENV_DIR="${PROFILE_VENV_DIRS[0]}"
@@ -100,7 +79,7 @@ for i in "${!PROFILE_DIRS[@]}"; do
     echo "[run]   [$i] ${PROFILE_NAMES[$i]} → ${PROFILE_HOMES[$i]} (route: $prefix_label)"
 done
 
-# ── Section 3b: System paths + per-profile port allocation ───────────
+# ── Section 3b: System paths ─────────────────────────────────────────
 BREW_DIR="$HOME/.linuxbrew"
 NODE_DIR="$HOME/.npm-global"
 GO_DIR="$HOME/.go"
@@ -108,21 +87,6 @@ CERTS_DIR="$HOME/.certs"
 INGRESS_PORT=49169
 HTTP_PORT=8080
 HTTPS_PORT=8443
-API_BASE_PORT=8642
-TTYD_HERMES_BASE_PORT=49269
-TTYD_TERMINAL_BASE_PORT=49369
-DASHBOARD_BASE_PORT=49469
-
-API_PORTS=()
-TTYD_HERMES_PORTS=()
-TTYD_TERMINAL_PORTS=()
-DASHBOARD_PORTS=()
-for i in "${!PROFILE_DIRS[@]}"; do
-    API_PORTS[$i]=$((API_BASE_PORT + i))
-    TTYD_HERMES_PORTS[$i]=$((TTYD_HERMES_BASE_PORT + i))
-    TTYD_TERMINAL_PORTS[$i]=$((TTYD_TERMINAL_BASE_PORT + i))
-    DASHBOARD_PORTS[$i]=$((DASHBOARD_BASE_PORT + i))
-done
 
 # Start nginx early with loading page (replaced with full config after setup)
 cat > /etc/nginx/nginx.conf << LOADCONF
@@ -439,74 +403,7 @@ TMUX
 fi
 
 # ── Section 7: Environment variable passthrough ──────────────────────
-# The add-on owns these vars per profile; user overrides are rejected.
-RESERVED_VARS="HERMES_HOME|HASS_TOKEN|HASS_URL|GITHUB_TOKEN|API_SERVER_PORT|API_SERVER_HOST"
-
-upsert_env_var() {
-    local env_file="$1" key="$2" value="$3"
-    if grep -q "^${key}=" "$env_file"; then
-        # Use a delimiter unlikely to appear in env values
-        sed -i "s|^${key}=.*|${key}=${value}|" "$env_file"
-    else
-        echo "${key}=${value}" >> "$env_file"
-    fi
-}
-
-apply_env_vars_for_profile() {
-    local i="$1"
-    local env_file="${PROFILE_HOMES[$i]}/.env"
-    local name="${PROFILE_NAMES[$i]}"
-
-    [ -f "$env_file" ] || return 0
-
-    # Top-level env_vars (applied to all profiles)
-    local pairs
-    pairs="$(jq -r '.env_vars[]? | "\(.name)=\(.value)"' "$OPTIONS_FILE" 2>/dev/null || true)"
-    if [ -n "$pairs" ]; then
-        while IFS= read -r line; do
-            local k="${line%%=*}" v="${line#*=}"
-            if echo "$k" | grep -qE "^($RESERVED_VARS)$"; then
-                echo "[run] [$name] Warning: skipping top-level env '$k' (use dedicated option)"
-                continue
-            fi
-            [ -n "$v" ] || continue
-            upsert_env_var "$env_file" "$k" "$v"
-        done <<< "$pairs"
-    fi
-
-    # Per-profile overrides (matched by profile list index)
-    local overrides
-    overrides="$(jq -r --argjson idx "$i" \
-        '.profiles[$idx]?.env_vars[]? | "\(.name)=\(.value)"' \
-        "$OPTIONS_FILE" 2>/dev/null || true)"
-    if [ -n "$overrides" ]; then
-        while IFS= read -r line; do
-            local k="${line%%=*}" v="${line#*=}"
-            if echo "$k" | grep -qE "^($RESERVED_VARS)$"; then
-                echo "[run] [$name] Warning: skipping per-profile env '$k' (use dedicated option)"
-                continue
-            fi
-            [ -n "$v" ] || continue
-            upsert_env_var "$env_file" "$k" "$v"
-            echo "[run] [$name] .env override: $k"
-        done <<< "$overrides"
-    fi
-
-    # Per-profile API server binding (always owned by the add-on)
-    upsert_env_var "$env_file" "API_SERVER_HOST" "127.0.0.1"
-    upsert_env_var "$env_file" "API_SERVER_PORT" "${API_PORTS[$i]}"
-
-    # API server enabled/disabled (shared)
-    upsert_env_var "$env_file" "API_SERVER_ENABLED" "$ENABLE_API"
-
-    # Optional shared API key
-    if [ -n "$ACCESS_PASSWORD" ]; then
-        upsert_env_var "$env_file" "API_SERVER_KEY" "$ACCESS_PASSWORD"
-    elif grep -q "^API_SERVER_KEY=" "$env_file"; then
-        sed -i "s|^API_SERVER_KEY=.*|API_SERVER_KEY=|" "$env_file"
-    fi
-}
-
+# apply_env_vars_for_profile + upsert_env_var live in profile-init.sh
 for i in "${!PROFILE_DIRS[@]}"; do
     apply_env_vars_for_profile "$i"
 done
