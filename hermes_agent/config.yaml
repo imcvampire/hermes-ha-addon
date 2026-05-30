@@ -1,5 +1,5 @@
 name: Hermes Agent
-version: "1.0.8"
+version: "1.1.0"
 slug: hermes_agent
 description: "The self-improving AI agent built by Nous Research. Home Assistant add-on by Wolfram Ravenwolf."
 url: "https://github.com/WolframRavenwolf/hermes-ha-addon"
@@ -32,6 +32,7 @@ options:
   homeassistant_token: ""
   hermes_home: ".hermes"
   profiles: []
+  profile_env_vars: []
   enable_dashboard: false
   enable_terminal: false
   enable_api: false
@@ -48,10 +49,11 @@ schema:
   homeassistant_token: "password?"
   hermes_home: "str?"
   profiles:
-    - home: "str"
-      env_vars?:
-        - name: "match(^[A-Z_][A-Z0-9_]{0,254}$)"
-          value: "str"
+    - "str"
+  profile_env_vars:
+    - profile: "str"
+      name: "match(^[A-Z_][A-Z0-9_]{0,254}$)"
+      value: "str"
   enable_dashboard: "bool"
   enable_terminal: "bool"
   enable_api: "bool"

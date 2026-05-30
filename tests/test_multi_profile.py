@@ -1,9 +1,11 @@
 """Multi-profile tests: resolution (A), env merge (B), rendered nginx config (D)."""
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -15,6 +17,12 @@ PROFILE_INIT_LIB = ROOT / "hermes_agent" / "profile-init.sh"
 NGINX_RENDER_LIB = ROOT / "hermes_agent" / "nginx-render.sh"
 NGINX_TPL = ROOT / "hermes_agent" / "nginx.conf.tpl"
 NGINX_PORTS_TPL = ROOT / "hermes_agent" / "nginx-ports.conf.tpl"
+
+# On macOS, /bin/bash is GPLv2-era 3.2 — the version Home Assistant developers
+# also hit locally. Force tests through it so bash-4-only features (mapfile,
+# associative arrays, etc.) trip the suite immediately instead of in the field.
+# Linux containers ship bash 4+ and resolve `bash` from PATH normally.
+BASH = "/bin/bash" if sys.platform == "darwin" and os.path.exists("/bin/bash") else "bash"
 
 
 # ── A. resolve_profiles ──────────────────────────────────────────────
@@ -45,7 +53,7 @@ def _run_resolve(options_json, *, legacy_hermes_home="", home_base=None):
             done
         """)
         result = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False
+            [BASH, "-c", script], text=True, capture_output=True, check=False
         )
         if result.returncode != 0:
             return {"error": result.stderr.strip(), "returncode": result.returncode}
@@ -78,7 +86,7 @@ class ProfileResolutionTests(unittest.TestCase):
 
     def test_three_profiles_primary_keeps_empty_prefix(self):
         res = _run_resolve(
-            {"profiles": [{"home": ".hermes"}, {"home": "amy"}, {"home": "bob"}]}
+            {"profiles": [".hermes", "amy", "bob"]}
         )
         rows = res["rows"]
         self.assertEqual(len(rows), 3)
@@ -91,7 +99,7 @@ class ProfileResolutionTests(unittest.TestCase):
 
     def test_port_allocation_increments_per_profile(self):
         res = _run_resolve(
-            {"profiles": [{"home": "a"}, {"home": "b"}, {"home": "c"}]}
+            {"profiles": ["a", "b", "c"]}
         )
         rows = res["rows"]
         self.assertEqual([r["api"] for r in rows], ["8642", "8643", "8644"])
@@ -102,7 +110,7 @@ class ProfileResolutionTests(unittest.TestCase):
     def test_name_collision_fails_with_clear_error(self):
         # ".hermes" sanitizes to "hermes"; collides with "hermes" entry.
         res = _run_resolve(
-            {"profiles": [{"home": ".hermes"}, {"home": "hermes"}]}
+            {"profiles": [".hermes", "hermes"]}
         )
         self.assertIn("error", res)
         self.assertIn("collision", res["error"])
@@ -110,7 +118,7 @@ class ProfileResolutionTests(unittest.TestCase):
 
     def test_sanitization_collapses_special_chars(self):
         res = _run_resolve(
-            {"profiles": [{"home": "primary"}, {"home": "my-profile.v2"}]}
+            {"profiles": ["primary", "my-profile.v2"]}
         )
         rows = res["rows"]
         self.assertEqual(rows[1]["name"], "my_profile_v2")
@@ -118,7 +126,7 @@ class ProfileResolutionTests(unittest.TestCase):
 
     def test_marker_and_home_paths_are_per_profile(self):
         res = _run_resolve(
-            {"profiles": [{"home": ".hermes"}, {"home": "amy"}]}
+            {"profiles": [".hermes", "amy"]}
         )
         home = res["home"]
         rows = res["rows"]
@@ -145,7 +153,7 @@ def _run_env_merge(
         home = tmp_path / "home"
         home.mkdir()
         profiles = options_json.get("profiles", [])
-        dirs = [p["home"] for p in profiles] if profiles else [".hermes"]
+        dirs = list(profiles) if profiles else [".hermes"]
         for idx, d in enumerate(dirs):
             (home / d).mkdir(parents=True, exist_ok=True)
             (home / d / ".env").write_text(initial_env.get(idx, ""))
@@ -166,7 +174,7 @@ def _run_env_merge(
             cat "${{PROFILE_HOMES[{profile_index}]}}/.env"
         """)
         result = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False
+            [BASH, "-c", script], text=True, capture_output=True, check=False
         )
         if result.returncode != 0:
             raise AssertionError(f"bash failed: {result.stderr}")
@@ -181,7 +189,7 @@ def _run_env_merge(
 class EnvMergeTests(unittest.TestCase):
     def test_top_level_env_applied_to_every_profile(self):
         options = {
-            "profiles": [{"home": ".hermes"}, {"home": "amy"}],
+            "profiles": [".hermes", "amy"],
             "env_vars": [{"name": "FOO", "value": "bar"}],
         }
         env0, _ = _run_env_merge(options, 0)
@@ -191,14 +199,11 @@ class EnvMergeTests(unittest.TestCase):
 
     def test_per_profile_override_layers_over_top_level(self):
         options = {
-            "profiles": [
-                {"home": ".hermes"},
-                {
-                    "home": "amy",
-                    "env_vars": [{"name": "FOO", "value": "amy-special"}],
-                },
-            ],
+            "profiles": [".hermes", "amy"],
             "env_vars": [{"name": "FOO", "value": "shared"}],
+            "profile_env_vars": [
+                {"profile": "amy", "name": "FOO", "value": "amy-special"},
+            ],
         }
         env0, _ = _run_env_merge(options, 0)
         env1, _ = _run_env_merge(options, 1)
@@ -207,7 +212,7 @@ class EnvMergeTests(unittest.TestCase):
 
     def test_reserved_vars_rejected_at_top_level(self):
         options = {
-            "profiles": [{"home": ".hermes"}],
+            "profiles": [".hermes"],
             "env_vars": [
                 {"name": "HERMES_HOME", "value": "/evil"},
                 {"name": "API_SERVER_PORT", "value": "9999"},
@@ -222,14 +227,10 @@ class EnvMergeTests(unittest.TestCase):
 
     def test_reserved_vars_rejected_in_per_profile_override(self):
         options = {
-            "profiles": [
-                {
-                    "home": ".hermes",
-                    "env_vars": [
-                        {"name": "HERMES_HOME", "value": "/evil"},
-                        {"name": "API_SERVER_HOST", "value": "0.0.0.0"},
-                    ],
-                }
+            "profiles": [".hermes"],
+            "profile_env_vars": [
+                {"profile": ".hermes", "name": "HERMES_HOME", "value": "/evil"},
+                {"profile": ".hermes", "name": "API_SERVER_HOST", "value": "0.0.0.0"},
             ],
         }
         env, _ = _run_env_merge(options, 0)
@@ -238,7 +239,7 @@ class EnvMergeTests(unittest.TestCase):
 
     def test_api_server_port_assigned_per_profile(self):
         options = {
-            "profiles": [{"home": "p0"}, {"home": "p1"}, {"home": "p2"}],
+            "profiles": ["p0", "p1", "p2"],
         }
         env0, _ = _run_env_merge(options, 0)
         env1, _ = _run_env_merge(options, 1)
@@ -250,19 +251,19 @@ class EnvMergeTests(unittest.TestCase):
             self.assertEqual(env.get("API_SERVER_HOST"), "127.0.0.1")
 
     def test_api_server_enabled_reflects_flag(self):
-        options = {"profiles": [{"home": ".hermes"}]}
+        options = {"profiles": [".hermes"]}
         env_off, _ = _run_env_merge(options, 0, enable_api="false")
         env_on, _ = _run_env_merge(options, 0, enable_api="true")
         self.assertEqual(env_off.get("API_SERVER_ENABLED"), "false")
         self.assertEqual(env_on.get("API_SERVER_ENABLED"), "true")
 
     def test_api_server_key_set_with_password(self):
-        options = {"profiles": [{"home": ".hermes"}]}
+        options = {"profiles": [".hermes"]}
         env_with, _ = _run_env_merge(options, 0, access_password="secret123")
         self.assertEqual(env_with.get("API_SERVER_KEY"), "secret123")
 
     def test_api_server_key_blanked_when_password_removed(self):
-        options = {"profiles": [{"home": ".hermes"}]}
+        options = {"profiles": [".hermes"]}
         # Simulate a previous run that wrote an API_SERVER_KEY value; now password is empty.
         env, _ = _run_env_merge(
             options,

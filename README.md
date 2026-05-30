@@ -45,22 +45,27 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `access_password`     |                                                    | Password for HTTP/HTTPS access (web terminal). Also used as the server API key  |
 | `env_vars`            | `OPENROUTER_API_KEY` (example)                     | Hermes .env variables — written to each profile's `.env` on each start          |
 | `hermes_home`         | `.hermes`                                          | Single-profile mode: agent profile directory (relative to ~). Ignored if `profiles` is non-empty |
-| `profiles`            | `[]`                                               | Multi-profile mode: list of profile entries (`home` + optional `env_vars`). First entry is the primary |
+| `profiles`            | `[]`                                               | Multi-profile mode: list of profile directories run concurrently. First entry is the primary |
+| `profile_env_vars`    | `[]`                                               | Per-profile `.env` overrides: each entry is `{profile, name, value}` where `profile` matches a directory in `profiles` |
 
-API keys can be configured in two places: `env_vars` above (convenient, via Home Assistant UI) or each profile's `.env` directly (full list, via terminal or `hermes setup`). Non-empty top-level `env_vars` are written to every profile's `.env` on each start, overriding existing entries. Per-profile `env_vars` (inside a `profiles` entry) layer on top of the top-level set.
+API keys can be configured in two places: `env_vars` above (convenient, via Home Assistant UI) or each profile's `.env` directly (full list, via terminal or `hermes setup`). Non-empty top-level `env_vars` are written to every profile's `.env` on each start, overriding existing entries. `profile_env_vars` entries layer on top of the top-level set for the profile whose directory matches `profile`.
 
 ### Running multiple profiles concurrently
 
-Set `profiles` to run several Hermes instances in the same add-on. Each entry is an object with a `home` directory (relative to `~`) and an optional `env_vars` list that overrides the top-level `env_vars` for that profile:
+Set `profiles` to run several Hermes instances in the same add-on. Per-profile env overrides live in `profile_env_vars` and reference each profile by its directory string (the schema stays flat because Home Assistant Supervisor only allows nested objects two levels deep):
 
 ```yaml
 profiles:
-  - home: .hermes
-  - home: amy
-    env_vars:
-      - name: OPENROUTER_API_KEY
-        value: amy-only-key
-  - home: bob
+  - .hermes
+  - amy
+  - bob
+profile_env_vars:
+  - profile: amy
+    name: OPENROUTER_API_KEY
+    value: amy-only-key
+  - profile: amy
+    name: SOME_AMY_VAR
+    value: amy-special
 ```
 
 The first entry is the **primary** — it keeps the existing root URLs (`/hermes/`, `/dashboard/`, `/terminal/`, `/v1/`). Each additional profile is exposed under `/profile/<name>/...`. Per-profile ports allocate from a base + index (`8642`, `49269`, `49369`, `49469`).
